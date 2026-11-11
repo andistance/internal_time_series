@@ -51,8 +51,9 @@ cd ..
 
 如果是 8 卡纯 DP，将分组字符串写为 `"0;1;2;3;4;5;6;7"`；8 卡做 DP=4、TP=2，则写为 `"0,1;2,3;4,5;6,7"`。引号要保留，卡号只代表本机 GPU。
 
-**本实验使用 H100 时，建议优先 TP=1、每张 GPU 一个 DP。** 单卡显存能容纳 Qwen3-8B 或 DS-1.5B 及当前上下文、并发预算时，独立副本可以同时处理更多任务，并省去 TP 通信，通常更适合提高整批数据的吞吐，参见 [vLLM 并行策略说明](https://docs.vllm.ai/en/stable/configuration/optimization/#parallelism-strategies)。现有 Qwen 普通脚本的**标注**仍默认 TP=2；在 H100 上采用纯 DP 时，要把这条标注命令的 TP 和 GPU 分组一起改成上表第一行。生成阶段已经默认纯 DP。
+**本实验使用 H100 时，建议优先 TP=1、每张 GPU 一个 DP。Qwen3.8-27B已经设置了BF16，理论上单卡也能容纳下一个模型推理，无需设置TP。** 单卡显存能容纳 Qwen3-8B 、DS-1.5B 或 Qwen3.8-27B 及当前上下文、并发预算时，独立副本可以同时处理更多任务，并省去 TP 通信，通常更适合提高整批数据的吞吐，参见 [vLLM 并行策略说明](https://docs.vllm.ai/en/stable/configuration/optimization/#parallelism-strategies)。
 
+<h4 style="color: gray;">1.2.1 0.12_500和0.08_800的对比实验（已做完）</h4>
 **然后运行两个对比实验。** 普通 Bash 会依次完成生成与 phase 划分、判题、整份 Monte Carlo 标注：
 
 ```bash
@@ -85,21 +86,31 @@ internal_time_series/log/mc_parallel_work_Qwen3-8B_0.12_500_shard0_total80/
 
 **先比较训练效果。只有决定沿用 `0.12_500` 后，再运行下面的扩充：**
 
+#### 1.2.2 采用0.12_500，DS-1.5B、Qwen3-8B和Qwen3.8-27B轮流构造数据
+
+**在运行之前，还是要根据1.2的提示先修改模型路径和GPU配置**，之后再运行下面的命令，先补齐Qwen3-8B的剩下500条，之后再三个模型以1000条为单位轮流构造数据：
+
 ```bash
-# 补充第 505～1008 题：新增 504 条，Qwen 累计 1008 条。
+# 补充第 505～1008 题：新增 504 条，Qwen3-8B 累计 1008 条。
 bash -e internal_time_series/scripts/build_data_505-1008_samples_0.12_500_Qwen3-8B.sh
 
-# 后四批各新增 1008 条，Qwen 最终累计 5040 条。
-bash -e internal_time_series/scripts/build_data_1009-2016_samples_0.12_500_Qwen3-8B.sh
-bash -e internal_time_series/scripts/build_data_2017-3024_samples_0.12_500_Qwen3-8B.sh
-bash -e internal_time_series/scripts/build_data_3025-4032_samples_0.12_500_Qwen3-8B.sh
-bash -e internal_time_series/scripts/build_data_4033-5040_samples_0.12_500_Qwen3-8B.sh
+# DS-1.5B 生成第 1009-2016 条。
+bash -e internal_time_series/scripts/build_data_1009-2016_samples_0.12_500_DS-1.5B.sh
 
-# 换 DeepSeek 处理第 5041～6048 题，再新增 1008 条。
+# Qwen3.8-27B 生成第 2017-3024 条。
+bash -e internal_time_series/scripts/build_data_2017-3024_samples_0.12_500_Qwen3.8-27B.sh
+
+# Qwen3-8B 生成第 3025-4032 条。
+bash -e internal_time_series/scripts/build_data_3025-4032_samples_0.12_500_Qwen3-8B.sh
+
+# Qwen3.8-27B 生成第 4033-5040 条。
+bash -e internal_time_series/scripts/build_data_4033-5040_samples_0.12_500_Qwen3.8-27B.sh
+
+# DS-1.5B 生成第 5041～6048 条。
 bash -e internal_time_series/scripts/build_data_5041-6048_samples_0.12_500_DS-1.5B.sh
 ```
 
-所有扩充数据属于 `0.12_500`：Qwen 前两批是 `shard0_total80`、`shard1_total80`，后四批是 `shard1_total40`～`shard4_total40`；DeepSeek 是 `DS-1.5B/shard5_total40`。`0.08_800` 对比组不重复计入扩充数据，各批结果也不会自动合成一个训练文件。
+所有扩充数据属于 `0.12_500`：Qwen3-8B 前两批是 `Qwen3-8B/shard0_total80`、`Qwen3-8B/shard1_total80`，后一批是`Qwen3-8B/shard3_total40`；DS-1.5B 的两批是 `DS-1.5B/shard1_total40`、`DS-1.5B/shard5_total40`；Qwen3.8-27B 是 `Qwen3.8-27B/shard2_total40`、`Qwen3.8-27B/shard4_total40`。`0.08_800` 不再使用。
 
 ---
 
