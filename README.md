@@ -30,8 +30,9 @@ cd ..
 | --- | --- |
 | `/mnt/wangchenglong/models/Qwen3-8B` | `/srv/models/Qwen3-8B` |
 | `/mnt/wangchenglong/models/DeepSeek-R1-Distill-Qwen-1.5B` | `/srv/models/DeepSeek-R1-Distill-Qwen-1.5B` |
+| `/mnt/wangchenglong/models/Qwen3.8-27B` | `/srv/models/Qwen3.8-27B` |
 
-填写保存模型配置、tokenizer 和权重的**目录**，不是某个权重文件。生成与标注两处都要改；sharded 清单里的五条标注命令也都要改。当前脚本中依赖原服务器的绝对路径就是这两种模型路径。
+填写保存模型配置、tokenizer 和权重的**目录**，不是某个权重文件。生成与标注两处都要改；sharded 清单里的五条标注命令也都要改。当前脚本中依赖原服务器的绝对路径就是这三种模型路径。
 
 其他路径以 `internal_time_series/` 开头，只要从仓库上一级目录运行，可以保持不变。若将数据或日志另放到其他磁盘，手动同步修改各步骤的输入、输出和 `--work_dir`，让下一步读取上一步实际生成的文件。代码、题库与模型都需要在服务器上准备好。
 
@@ -108,9 +109,20 @@ bash -e internal_time_series/scripts/build_data_4033-5040_samples_0.12_500_Qwen3
 
 # DS-1.5B 生成第 5041～6048 条。
 bash -e internal_time_series/scripts/build_data_5041-6048_samples_0.12_500_DS-1.5B.sh
+
+# 后续三批：每批 1008 条，合计新增 3024 条，题目范围连续衔接至第 9072 条。
+
+# Qwen3-8B 生成第 6049-7056 条。
+bash -e internal_time_series/scripts/build_data_6049-7056_samples_0.12_500_Qwen3-8B.sh
+
+# DS-1.5B 生成第 7057～8064 条。
+bash -e internal_time_series/scripts/build_data_7057-8064_samples_0.12_500_DS-1.5B.sh
+
+# Qwen3.8-27B 生成第 8065-9072 条。
+bash -e internal_time_series/scripts/build_data_8065-9072_samples_0.12_500_Qwen3.8-27B.sh
 ```
 
-所有扩充数据属于 `0.12_500`：Qwen3-8B 前两批是 `Qwen3-8B/shard0_total80`、`Qwen3-8B/shard1_total80`，后一批是`Qwen3-8B/shard3_total40`；DS-1.5B 的两批是 `DS-1.5B/shard1_total40`、`DS-1.5B/shard5_total40`；Qwen3.8-27B 是 `Qwen3.8-27B/shard2_total40`、`Qwen3.8-27B/shard4_total40`。`0.08_800` 不再使用。
+所有扩充数据属于 `0.12_500`：Qwen3-8B 前两批是 `Qwen3-8B/shard0_total80`、`Qwen3-8B/shard1_total80`，后两批是`Qwen3-8B/shard3_total40`和`Qwen3-8B/shard6_total40`；DS-1.5B 的三批是 `DS-1.5B/shard1_total40`、`DS-1.5B/shard5_total40`和`DS-1.5B/shard7_total40`；Qwen3.8-27B 是 `Qwen3.8-27B/shard2_total40`、`Qwen3.8-27B/shard4_total40`和`Qwen3.8-27B/shard8_total40`。`0.08_800` 不再使用。
 
 ---
 
@@ -176,7 +188,7 @@ step 置信度 `token_avg_confidence` 是该 step 内实际生成 token 概率 `
 | `--output_steps_path` | labeled 轨迹输出；未开启可选 `--inplace` 时不覆盖原输入。 |
 | `--output_details_path` | 终点级续写、判题、正确次数和实际采样数等详情输出，父目录须存在。 |
 | `--model_path` | 同一生成模型的本机路径；生成、标注两处都要修改。 |
-| `--tensor_parallel_size`、`--gpu_groups` | 每 worker 的 TP 和本机 GPU 分组。Qwen 整份版是 TP=2、`"0,1;2,3;4,5"`；其余标注是 TP=1、`"0;1;2;3;4;5"`。注意参数名不是生成的 `--gpus`。 |
+| `--tensor_parallel_size`、`--gpu_groups` | 每 worker 的 TP 和本机 GPU 分组。早期 Qwen 整份版是 TP=2、`"0,1;2,3;4,5"`；本次新增的第 6049～9072 题三份脚本，生成和标注均为 TP=1、DP=6，分组为 `"0;1;2;3;4;5"`。其余脚本以实际命令为准。注意参数名不是生成的 `--gpus`。 |
 | `--work_dir` | worker 输入副本、已有标签、详情和日志的状态目录。每个实验/part 独立，恢复原任务才复用。 |
 | `--K` | 当前为 8，表示每个选中终点续写次数；Python 默认值是 10，所以应显式传入。 |
 | `--batch_size` | 当前为 8，表示每个 worker 一批处理多少前缀任务；K=8 时最多产生 64 条续写，不表示 8 道原题。 |
@@ -184,7 +196,7 @@ step 置信度 `token_avg_confidence` 是该 step 内实际生成 token 概率 `
 | `--max_tokens` | 每条续写新增 token 上限，当前 16384；独立于原始生成阶段的同名设置。 |
 | `--max_model_len` | 题目、已有前缀与续写合计上限，当前 16384；已有前缀越长，剩余续写空间越少。 |
 | `--gpu_memory_utilization` | 当前为 0.98，标注 vLLM 的显存预算；增加 K、批大小和前缀长度都会影响显存。 |
-| `--vllm_enforce_eager` | 无值开关，禁用 CUDA Graph，减少图捕获相关显存开销，可能影响速度。现有 Qwen 整份版开启，其余标注未开启。 |
+| `--vllm_enforce_eager` | 无值开关，禁用 CUDA Graph，减少图捕获相关显存开销，可能影响速度。早期 Qwen 整份版开启；本次新增的三份脚本未开启。 |
 
 生成和标注默认采样温度为 `--temperature 0.7`、`--top_p 0.95`，可分别显式修改；默认未设置 `--seed`。固定 seed 有助于复现，但不同 GPU 分组或软件版本仍可能得到不同输出。Qwen thinking 默认 true，可显式传 `--enable_thinking true`。
 
@@ -207,6 +219,9 @@ step 置信度 `token_avg_confidence` 是该 step 内实际生成 token 概率 `
 | 3025～4032 | 1008 | 40 | 3 | `shard3_total40` |
 | 4033～5040 | 1008 | 40 | 4 | `shard4_total40` |
 | 5041～6048 | 1008 | 40 | 5 | `shard5_total40` |
+| 6049～7056 | 1008 | 40 | 6 | `shard6_total40` |
+| 7057～8064 | 1008 | 40 | 7 | `shard7_total40` |
+| 8065～9072 | 1008 | 40 | 8 | `shard8_total40` |
 
 对于题目总数 N、总份数 P 和 0-based 分片 i，代码的计算方式是：
 
