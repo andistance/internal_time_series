@@ -82,6 +82,38 @@ bash -e internal_time_series/scripts/build_data_10081-11088_samples_8_1.2_Qwen3.
 
 所有扩充数据属于 `8_1.2`，保存在 `internal_time_series/data/train/deepscaler_phases_8_1.2_8192/` 下：DS-1.5B 的三批是 `DS-1.5B/shard5_total40`、`DS-1.5B/shard6_total40` 和 `DS-1.5B/shard7_total40`；Qwen3.8-27B 的三批是 `Qwen3.8-27B/shard8_total40`、`Qwen3.8-27B/shard9_total40` 和 `Qwen3.8-27B/shard10_total40`。六份脚本均采用 `original` 划分算法，`--num_segments 8 --entropy_threshold 1.2`；生成与标注的 `--max_tokens`、`--max_model_len` 均为 `8192`。
 
+#### 1.2.2 采用0.12_500，Qwen3-8B构造多领域训练数据（最新）
+
+**在运行之前，还是要根据1.2的提示先修改模型路径和GPU配置**，之后按顺序运行下面八个脚本，使用 Qwen3-8B 分别构造日程推理、因果判断、科学问答、逻辑推理、会议规划、时间序列推理、对象追踪和真假话推理等多领域的训练数据。每个脚本依次完成推理轨迹生成与 phase 划分、判题和整份 Monte Carlo 标注：
+
+```bash
+# Qwen3-8B 构造 calendar（日程推理）领域的数据。
+bash -e internal_time_series/scripts/build_data_calendar_0.12_500_Qwen3-8B.sh
+
+# Qwen3-8B 构造 causal_judgement（因果判断）领域的数据。
+bash -e internal_time_series/scripts/build_data_causal_judgement_0.12_500_Qwen3-8B.sh
+
+# Qwen3-8B 构造 gpqa_diamond（科学问答）领域的数据。
+bash -e internal_time_series/scripts/build_data_gpqa_diamond_0.12_500_Qwen3-8B.sh
+
+# Qwen3-8B 构造 logical_deduction_five_objects（五对象逻辑推理）领域的数据。
+bash -e internal_time_series/scripts/build_data_logical_deduction_five_objects_0.12_500_Qwen3-8B.sh
+
+# Qwen3-8B 构造 meeting（会议规划）领域的数据。
+bash -e internal_time_series/scripts/build_data_meeting_0.12_500_Qwen3-8B.sh
+
+# Qwen3-8B 构造 temporal_sequences（时间序列推理）领域的数据。
+bash -e internal_time_series/scripts/build_data_temporal_sequences_0.12_500_Qwen3-8B.sh
+
+# Qwen3-8B 构造 tracking_shuffled_objects_five_objects（五对象位置追踪）领域的数据。
+bash -e internal_time_series/scripts/build_data_tracking_shuffled_objects_five_objects_0.12_500_Qwen3-8B.sh
+
+# Qwen3-8B 构造 web_of_lies（真假话推理）领域的数据。
+bash -e internal_time_series/scripts/build_data_web_of_lies_0.12_500_Qwen3-8B.sh
+```
+
+`bash -e` 会在脚本中的命令失败后停止。八份脚本分别读取 `internal_time_series/deepscaler/data/test/<领域名>.json` 中的全部样本，不对输入分片，也不设置 `--limit`。所有多领域数据属于 `0.12_500`，保存在 `internal_time_series/data/train/` 下，对应目录依次为 `calendar_0.12_500_16384/Qwen3-8B/`、`causal_judgement_0.12_500_16384/Qwen3-8B/`、`gpqa_diamond_0.12_500_16384/Qwen3-8B/`、`logical_deduction_five_objects_0.12_500_16384/Qwen3-8B/`、`meeting_0.12_500_16384/Qwen3-8B/`、`temporal_sequences_0.12_500_16384/Qwen3-8B/`、`tracking_shuffled_objects_five_objects_0.12_500_16384/Qwen3-8B/`、`web_of_lies_0.12_500_16384/Qwen3-8B/`。
+
 ---
 
 > **实验运行顺序到此结束。以下内容用于按需理解、修改或恢复命令，不是需要接着执行的任务。**
