@@ -112,7 +112,16 @@ bash -e internal_time_series/scripts/build_data_tracking_shuffled_objects_five_o
 bash -e internal_time_series/scripts/build_data_web_of_lies_0.12_500_Qwen3-8B.sh
 ```
 
-`bash -e` 会在脚本中的命令失败后停止。八份脚本分别读取 `internal_time_series/deepscaler/data/test/<领域名>.json` 中的全部样本，不对输入分片，也不设置 `--limit`。所有多领域数据属于 `0.12_500`，保存在 `internal_time_series/data/train/` 下，对应目录依次为 `calendar_0.12_500_16384/Qwen3-8B/`、`causal_judgement_0.12_500_16384/Qwen3-8B/`、`gpqa_diamond_0.12_500_16384/Qwen3-8B/`、`logical_deduction_five_objects_0.12_500_16384/Qwen3-8B/`、`meeting_0.12_500_16384/Qwen3-8B/`、`temporal_sequences_0.12_500_16384/Qwen3-8B/`、`tracking_shuffled_objects_five_objects_0.12_500_16384/Qwen3-8B/`、`web_of_lies_0.12_500_16384/Qwen3-8B/`。
+`bash -e` 会在脚本中的命令失败后停止。八份脚本分别读取 `internal_time_series/deepscaler/data/test/<领域名>.json` 中的全部样本，不对输入分片，也不设置 `--limit`。所有多领域数据属于 `0.12_500`，四类数据文件统一保存在 `internal_time_series/data/train/multi_domain/` 下。每个领域使用 `<领域名>_0.12_500_16384_Qwen3-8B_` 作为文件名前缀，对应文件名为：
+
+```text
+<领域名>_0.12_500_16384_Qwen3-8B_summary.jsonl
+<领域名>_0.12_500_16384_Qwen3-8B_steps.jsonl
+<领域名>_0.12_500_16384_Qwen3-8B_steps_labeled.jsonl
+<领域名>_0.12_500_16384_Qwen3-8B_steps_monte_carlo_details.jsonl
+```
+
+其中 `<领域名>` 依次为 `calendar`、`causal_judgement`、`gpqa_diamond`、`logical_deduction_five_objects`、`meeting`、`temporal_sequences`、`tracking_shuffled_objects_five_objects` 和 `web_of_lies`。
 
 ---
 
