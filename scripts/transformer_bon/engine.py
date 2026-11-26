@@ -4,11 +4,13 @@ from .errors import raise_record_error, require_success
 import copy
 import gc
 import inspect
+import itertools
 import json
 import math
 import os
 import threading
 import traceback
+import numpy as np
 from dataclasses import dataclass
 from pathlib import Path
 from types import SimpleNamespace
@@ -27,6 +29,10 @@ from typing import (
 )
 
 from .legacy import load_legacy_module
+from .value_parallel import parse_value_devices, load_parallel_value_components
+from .value_features import prepare_value_items, copy_steps, attach_phase_scores
+from .scoring_profile import ScoringProfile
+from .ordered_pipeline import background_iterator, check_stopped
 from .entropy_cache import (
     append_entropy_record,
     build_token_entropy_record,
@@ -137,6 +143,9 @@ class BestOfNConfig:
         if self.generation_worker_startup_timeout <= 0:
             raise ValueError("generation_worker_startup_timeout must be positive")
         parse_gpu_groups(self.gpu_groups, self.tensor_parallel_size)
+        value_groups = parse_value_devices(self.value_device)
+        if value_groups and self.value_residency == "cpu":
+            raise ValueError("Multi-GPU value_device requires value_residency auto or gpu")
 
     @property
     def parsed_gpu_groups(self) -> Tuple[str, ...]:
@@ -278,29 +287,48 @@ def _iter_stage_request_entries(path: Path) -> Iterator[Dict[str, Any]]:
     """Read legacy request bundles and candidate-granular stage lines."""
 
     _repair_truncated_stage_tail(path)
-    grouped: Dict[str, Dict[str, Any]] = {}
+    grouped = {}
     order: List[str] = []
-    for entry in _iter_stage_entries(path):
-        request_id = str(entry["request_id"])
-        if request_id not in grouped:
-            order.append(request_id)
-            grouped[request_id] = {
-                "records": {},
-            }
-        if "record" in entry:
-            record = entry["record"]
-            grouped[request_id]["records"][
-                int(entry.get("sequence_idx", record["sequence_idx"]))
-            ] = record
-        else:
-            for record in entry.get("records", []):
-                grouped[request_id]["records"][int(record["sequence_idx"])] = record
-    for request_id in order:
-        item = grouped[request_id]
-        yield {
-            "request_id": request_id,
-            "records": [item["records"][index] for index in sorted(item["records"])],
-        }
+    if not path.exists():
+        return
+    # Keep offsets for legacy/multi-signal bundles, never all decoded payloads.
+    with path.open("rb") as file:
+        for line_number in itertools.count(1):
+            offset = file.tell()
+            raw = file.readline()
+            if not raw:
+                break
+            if not raw.strip():
+                continue
+            try:
+                entry = json.loads(raw.decode("utf-8"))
+            except json.JSONDecodeError as error:
+                raise ValueError(f"Invalid staged JSONL at {path}:{line_number}") from error
+            if not isinstance(entry, dict) or "request_id" not in entry:
+                raise ValueError(f"Invalid staged entry at {path}:{line_number}")
+            require_success(entry)
+            request_id = str(entry["request_id"])
+            if request_id not in grouped:
+                order.append(request_id)
+                grouped[request_id] = {}
+            if "record" in entry:
+                record = entry["record"]
+                grouped[request_id][int(entry.get("sequence_idx", record["sequence_idx"]))] = (offset, None)
+            else:
+                for member, record in enumerate(entry.get("records", [])):
+                    grouped[request_id][int(record["sequence_idx"])] = (offset, member)
+    with path.open("rb") as file:
+        for request_id in order:
+            records = []
+            previous, entry = None, None
+            for index in sorted(grouped[request_id]):
+                offset, member = grouped[request_id][index]
+                if offset != previous:
+                    file.seek(offset)
+                    entry = json.loads(file.readline())
+                    previous = offset
+                records.append(entry["record"] if member is None else entry["records"][member])
+            yield {"request_id": request_id, "records": records}
 
 
 def _append_stage_entry(path: Path, entry: Dict[str, Any]) -> None:
@@ -428,6 +456,7 @@ class BestOfNService:
         self._value_components: Optional[Tuple[Any, Any, Any]] = None
         self._value_target_device: Any = None
         self._value_transformer_type: Optional[str] = None
+        self._value_profile = None
 
     def _llm_kwargs(self, args: SimpleNamespace) -> Dict[str, Any]:
         """Build vLLM arguments without changing legacy defaults."""
@@ -733,7 +762,11 @@ class BestOfNService:
         self, legacy: Any, args: SimpleNamespace
     ) -> Tuple[Any, Any, Any]:
         if self._value_components is None:
-            model, normalizer, device, metadata = legacy.load_value_components(args)
+            groups = parse_value_devices(args.value_device)
+            model, normalizer, device, metadata = (
+                load_parallel_value_components(legacy, args, groups)
+                if groups else legacy.load_value_components(args)
+            )
             self._value_target_device = device
             transformer_type = None
             if isinstance(metadata, Mapping):
@@ -747,6 +780,9 @@ class BestOfNService:
                 model = model.to("cpu")
                 device = legacy.torch.device("cpu")
             self._value_components = (model, normalizer, device)
+            scoring_devices = groups or ((str(device),),)
+            print(f"[INFO] Transformer scoring devices: {scoring_devices}; "
+                  f"profile={self.config.performance_profile}; original forward batches preserved")
         elif (
             self.config.value_residency != "cpu"
             and self._value_target_device is not None
@@ -784,56 +820,49 @@ class BestOfNService:
         prepared_records: Sequence[Dict[str, Any]],
         args: SimpleNamespace,
         on_rollout: Optional[Callable[[], None]] = None,
+        *,
+        _value_items=None,
     ) -> List[BestOfNCandidate]:
         model, normalizer, device = self._get_value_components(legacy, args)
+        profile = self._value_profile
         candidates_by_index: Dict[int, BestOfNCandidate] = {}
-        valid_items: List[Tuple[Dict[str, Any], Any]] = []
-
-
-        for prepared in prepared_records:
-            sequence_idx = int(prepared["sequence_idx"])
-            try:
-                if prepared.get("status") != "ok":
-                    raise ValueError(prepared.get("error", "Candidate preparation failed"))
-                features = normalizer.transform_one(
-                    legacy.build_value_features(
-                        prepared,
-                        transformer_type=self._value_transformer_type
-                        or "bidirectional",
-                    )
-                )
-                if not prepared.get("phase_ranges"):
-                    raise ValueError("Candidate has no phase ranges")
-                valid_items.append((prepared, features))
-            except Exception:
-                raise
-
+        # Right padding is independent of candidate order. Nearby lengths avoid
+        # paying for the longest trajectory in every batch; restore input order
+        # through candidates_by_index below.
+        valid_items = _value_items if _value_items is not None else prepare_value_items(
+            legacy, prepared_records, normalizer, self._value_transformer_type or "bidirectional",
+        )
         for batch_start in range(0, len(valid_items), args.scoring_batch_size):
             batch_items = valid_items[
                 batch_start : batch_start + args.scoring_batch_size
             ]
             arrays = [features for _, features in batch_items]
+            batch_started = profile.start() if profile is not None else None
             max_len = max(array.shape[0] for array in arrays)
             feature_dim = arrays[0].shape[1]
-            x_tensor = legacy.torch.zeros(
-                len(arrays), max_len, feature_dim, dtype=legacy.torch.float32
-            )
-            attention_mask = legacy.torch.zeros(
-                len(arrays), max_len, dtype=legacy.torch.bool
-            )
+            # NumPy fills avoid a Torch CPU thread-pool launch and tensor slice
+            # dispatch per row. The resulting layout/bytes are unchanged.
+            host_x = np.zeros((len(arrays), max_len, feature_dim), dtype=np.float32)
+            host_mask = np.zeros((len(arrays), max_len), dtype=np.bool_)
             lengths: List[int] = []
             for batch_index, array in enumerate(arrays):
                 length = int(array.shape[0])
                 lengths.append(length)
-                x_tensor[batch_index, :length] = legacy.torch.from_numpy(array)
-                attention_mask[batch_index, :length] = True
+                host_x[batch_index, :length] = array
+                host_mask[batch_index, :length] = True
+            x_tensor = legacy.torch.from_numpy(host_x)
+            attention_mask = legacy.torch.from_numpy(host_mask)
 
             try:
-                with legacy.torch.no_grad():
+                if profile is not None:
+                    profile.add("host_batch", batch_started)
+                forward_started = profile.start() if profile is not None else None
+                input_device = getattr(model, "input_device", device)
+                with legacy.torch.inference_mode():
                     predictions = (
                         model(
-                            x_tensor.to(device),
-                            attention_mask=attention_mask.to(device),
+                            x_tensor.to(input_device),
+                            attention_mask=attention_mask.to(input_device),
                         )
                         .detach()
                         .cpu()
@@ -842,21 +871,22 @@ class BestOfNService:
             except Exception:
                 raise
 
+            if profile is not None:
+                profile.add("forward_with_transfers", forward_started)
+            post_started = profile.start() if profile is not None else None
+
             for batch_index, ((prepared, _), length) in enumerate(
                 zip(batch_items, lengths)
             ):
                 sequence_idx = int(prepared["sequence_idx"])
                 links = _link_fields(request, sequence_idx)
                 try:
-                    step_predictions = [
-                        float(value)
-                        for value in predictions[batch_index, :length]
-                    ]
-                    steps = copy.deepcopy(prepared["steps"])
+                    step_predictions = predictions[batch_index, :length].tolist()
+                    steps = copy_steps(prepared["steps"])
                     for step, prediction in zip(steps, step_predictions):
                         step["trajectory_model_step_score"] = prediction
-                    phase_scores, final_scores = legacy.attach_phase_scores_to_steps(
-                        steps,
+                    phase_scores, final_scores = attach_phase_scores(
+                        legacy, steps,
                         prepared["phase_ranges"],
                         step_predictions,
                     )
@@ -902,6 +932,8 @@ class BestOfNService:
                 finally:
                     if on_rollout is not None:
                         on_rollout()
+            if profile is not None:
+                profile.add("postprocess", post_started)
 
         return [
             candidates_by_index[int(prepared["sequence_idx"])]
@@ -1218,6 +1250,90 @@ class BestOfNService:
         self, legacy, entries, request_by_id, args, on_rollout_complete=None,
     ):
         """Score in input order; PRM subclasses may overlap bounded lookahead."""
+        groups = parse_value_devices(self.config.value_device)
+        standard = getattr(self._score, "__func__", None) is BestOfNService._score
+        if standard:
+            entries = iter(entries)
+            first = next(entries, None)
+            if first is None:
+                return
+            model, normalizer, _ = self._get_value_components(legacy, args)
+            profile = self._value_profile = ScoringProfile()
+
+            def score_entry(item):
+                request, records, features = item
+                return request, self._score(legacy, request, records, args, _value_items=features)
+
+            source = itertools.chain((first,), entries)
+            del first
+            def prepare(stop):
+                while True:
+                    read_started = profile.start()
+                    entry = next(source, None)
+                    profile.add("prepared_read", read_started)
+                    if entry is None:
+                        return
+                    check_stopped(stop)
+                    records = entry["records"]
+                    feature_started = profile.start()
+                    features = prepare_value_items(
+                        legacy, records, normalizer, self._value_transformer_type or "bidirectional",
+                    )
+                    profile.add("features", feature_started)
+                    yield request_by_id[str(entry["request_id"])], records, features
+
+            def compute(ready, stop):
+                if len(groups) > 1:
+                    scored = model.map_requests(score_entry, ready)
+                    try:
+                        for result in scored:
+                            check_stopped(stop)
+                            yield result
+                    finally:
+                        scored.close()
+                else:
+                    for entry in ready:
+                        check_stopped(stop)
+                        yield score_entry(entry)
+
+            def produce(stop):
+                if self.config.performance_profile == "memory":
+                    yield from compute(prepare(stop), stop)
+                else:
+                    # One CPU feature bundle ahead of GPU work, independent of
+                    # the single completed result ahead of benchmark persistence.
+                    with background_iterator(prepare) as ready:
+                        yield from compute(ready, stop)
+
+            def deliver(scored):
+                for request, candidates in scored:
+                    if on_rollout_complete is not None:
+                        for _ in candidates:
+                            on_rollout_complete("scoring")
+                    consumer_started = profile.start()
+                    try:
+                        yield request, candidates
+                    finally:
+                        profile.add("consumer_evaluation_and_write", consumer_started)
+
+            if self.config.performance_profile == "memory":
+                scored = produce(None)
+                try:
+                    yield from deliver(scored)
+                finally:
+                    scored.close()
+                    profile.report()
+                    self._value_profile = None
+            else:
+                # Only one result ahead. All callbacks/writes stay on the caller
+                # thread; the worker is joined before parking or closing models.
+                try:
+                    with background_iterator(produce) as scored:
+                        yield from deliver(scored)
+                finally:
+                    profile.report()
+                    self._value_profile = None
+            return
         for entry in entries:
             request = request_by_id[str(entry["request_id"])]
             score_kwargs: Dict[str, Any] = {}
@@ -1688,6 +1804,8 @@ class BestOfNService:
         with self._lock:
             if self._value_components is not None:
                 model, _, _ = self._value_components
+                if parse_value_devices(self.config.value_device):
+                    model.close()
                 del model
                 self._value_components = None
                 gc.collect()

@@ -58,6 +58,111 @@ The confidence-trajectory model remains independent. For example,
 `--bon_value_device cuda:0 --bon_value_residency gpu` keeps it on GPU 0 while
 the generation and entropy stages use GPU groups 1-7.
 
+The existing `--value_device` / `--bon_value_device` also accepts explicit
+multi-GPU layouts (quote the argument in the shell):
+
+| Value | Scoring layout |
+| --- | --- |
+| `"cuda:0;cuda:1;cuda:2;cuda:3"` or `"0;1;2;3"` | DP=4, TP=1 |
+| `"cuda:0,cuda:1"` or `"0,1"` | DP=1, TP=2 |
+| `"cuda:0,cuda:1;cuda:2,cuda:3"` or `"0,1;2,3"` | DP=2, TP=2 |
+
+GPU indices are relative to `CUDA_VISIBLE_DEVICES`. TP groups must be disjoint
+and have equal sizes. Each TP group partitions attention heads and FFN weights;
+its size cannot exceed the checkpoint's head count or FFN width. Uneven head
+partitions are supported. These settings are independent of `--bon_gpus` and
+`--bon_tensor_parallel_size`, which still control generation/entropy. The same
+argument works in GPQA, LiveCodeBench, NaturalPlan's three subsets, and BBH
+without benchmark changes. Existing `auto`, `cpu`, `cuda`, and `cuda:N` values
+retain their original device selection.
+
+Multi-GPU scoring loads the checkpoint once on CPU and keeps only the required
+weight shards on each GPU. Independent DP replicas score bounded lookahead
+requests concurrently and emit results in input order. `scoring_batch_size`
+remains the maximum trajectories per forward pass per DP replica. Within each
+request, batches group similar lengths and restore candidate order afterward.
+The new path uses FP32 inference and PyTorch SDPA; causal right-padded inputs
+use `is_causal` without constructing a quadratic causal/padding mask. There is
+no extra output, checkpoint, or intermediate score file. Minor FP32 rounding
+differences from different attention kernels and TP reductions are possible.
+
+For this small value model, prefer DP when a complete replica fits on one GPU;
+TP adds communication and is primarily useful for larger models/batches.
+Actual gains depend on trajectory lengths, batch size and GPU interconnect.
+Use `value_residency=auto` or `gpu` with multi-GPU layouts; `auto` still parks
+all shards on CPU between staged runs when generation GPU groups are set.
+Explicit `value_residency=cpu` requires a single-device setting. No `torchrun`,
+NCCL setup or additional dependencies are required for this single-process,
+multi-GPU implementation.
+
+### Exact-result scoring throughput
+
+The service vectorizes the original three-step confidence features in float64
+using the same arithmetic/reduction order before casting to float32. It keeps
+the original model, precision, per-request length sort, forward batch boundaries,
+padding shapes and phase aggregation. It does not combine requests into a new
+GPU batch: with N=8, `scoring_batch_size=256` still runs at most eight trajectories
+per request. This preserves scores rather than trading rounding differences for
+larger batches. Custom feature builders retain their compatibility path.
+
+`throughput` and `balanced` overlap one CPU feature bundle ahead of GPU work and
+one completed result ahead of benchmark evaluation/persistence. Queues are
+bounded; cancellation joins workers before model teardown, and progress callbacks
+stay on the caller thread. DP replicas are refilled before returning results.
+`memory` disables the background feature/result lookahead. GPU forward batch
+sizes and activation requirements are unchanged. Legacy/multi-signal staging
+also retains file offsets instead of decoding all requests into memory at once.
+
+NaturalPlan's calendar, meeting and trip runners use an offset-indexed result
+writer instead of rereading and rewriting every previous trajectory after each
+question. Resume retains keys/token counts rather than historical payloads.
+Appends are flushed/fsynced per request; a final streaming sort/compaction leaves
+the same JSON serialization and key order as the original writer, with one row
+per candidate and no extra permanent files. During a run, appended replacement
+rows can coexist until that compaction. Incomplete candidate pairs remain
+eligible for resume; partial trailing rows are repaired on reopening.
+
+Run `python -m unittest scripts.transformer_bon.test_value_throughput -v` for
+exact feature bytes, original forward inputs/output JSON, bounded prefetch,
+worker cleanup, NaturalPlan output bytes and resume tests. The exact CUDA
+forward comparison runs on hosts with a visible CUDA GPU.
+
+Large scoring/result JSON rows now use persistent CPU codec helpers: at most
+two encoders and one decoder per parent process. Helpers are launched directly
+with the same Python executable and import only the standard library, without
+loading the benchmark main or CUDA model. They use the same `json` serializer;
+binary IPC preserves float bits and dictionary order. Small rows and requests
+above a 4 MiB IPC budget stay local; at most two encoding requests are in flight.
+No score cache or payload file is created. Helpers are reused and reaped on
+normal interpreter exit. Set `TRANSFORMER_BON_JSON_WORKERS=0` to keep all JSON
+work in the parent (useful on CPU-constrained hosts).
+
+NaturalPlan final sorting copies freshly appended canonical JSON lines as bytes;
+only existing rows requiring normalization are decoded/re-encoded. Host batches
+use contiguous NumPy fills with the same float32/bool bytes and shapes as the
+previous Torch collation. Phase postprocessing reuses its float64 array but keeps
+each original prefix clip/log/sum/exp/min/mean operation; it does not replace the
+reductions with cumulative products or sums.
+
+Set `TRANSFORMER_BON_PROFILE=1` before the existing command to log prepared-read,
+feature, host-batch, forward-with-transfers, postprocessing and consumer
+evaluation/write wall times. The forward interval includes the existing CPU
+result-copy wait, not a separate CUDA kernel measurement. Parallel intervals
+overlap and must not be added to estimate total elapsed time. Codec call counts,
+process IDs and wall totals are also reported; final writer compaction occurs
+after the service iterator and is outside those scoring timings. Profiling is
+off by default. No CLI argument, model precision, forward batch or result format
+changes are required.
+
+Run `python -m unittest scripts.transformer_bon.test_json_codec -v` for JSON byte
+and float-bit parity, codec lifecycle/bounds, exact prefix reductions and raw-line
+compaction tests.
+
+Run `python -m unittest scripts.transformer_bon.test_value_parallel -v` in the
+evaluation environment to check parity, output schema/volume, OOM splitting,
+and worker cleanup. CUDA DP/TP and CPU parking/restore parity checks run when
+at least two GPUs are visible (DP=2, TP=2 is also checked with four GPUs).
+
 ## Selectable PRM backends
 
 PRM phase scoring defaults to `qwen2.5-math-prm-7b`. Use

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-import json
+from .json_codec import decode_json
 from collections.abc import MutableMapping
 from typing import NamedTuple
 
@@ -15,7 +15,7 @@ class PreparedLocation(NamedTuple):
     def read(self):
         with self.path.open("rb") as file:
             file.seek(self.offset)
-            entry = json.loads(file.readline())
+            entry = decode_json(file.readline())
         return self.decode(entry)
 
     def decode(self, entry):
@@ -63,7 +63,7 @@ class PreparedSlots(MutableMapping):
                         files[location.path] = location.path.open("rb")
                     file = files[location.path]
                     file.seek(location.offset)
-                    entry = json.loads(file.readline())
+                    entry = decode_json(file.readline())
                     previous = identity
                 result.append(location.decode(entry))
             return result

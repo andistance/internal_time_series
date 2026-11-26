@@ -1,6 +1,6 @@
 # 推理轨迹数据构造
 
-使用完整的 **40,315 条题库**，当前采用 `8_1.2` phase 划分配置，分别为 DS-1.5B 和 Qwen3.8-27B 构造数据。文件名中的样本范围从 1 开始编号；不设置 `--limit`。训练步骤另行安排。
+使用完整的 **40,315 条题库**，当前采用 `0.12_500_16384` 配置，用 Qwen3-8B 补全约 3000 条数据（三批实际合计 3024 条）。文件名中的样本范围从 1 开始编号；不设置 `--limit`。训练步骤另行安排。
 
 ## 1. 安装、运行与使用说明
 
@@ -24,7 +24,7 @@ cd ..
 
 ### 1.2 手动修改路径和 GPU 配置，再运行实验
 
-**先修改模型路径。** 用编辑器打开要运行的 `scripts/build_data_*.sh`，将每条生成命令和每条 Monte Carlo 标注命令中的 `--model_path` 改成这台服务器的模型目录：
+**先修改模型路径。** 用编辑器打开要运行的 `scripts/bash/build_data_*.sh`，将每条生成命令和每条 Monte Carlo 标注命令中的 `--model_path` 改成这台服务器的模型目录：
 
 | 脚本里的原值 | 手动替换为，例如 |
 | --- | --- |
@@ -52,76 +52,100 @@ cd ..
 
 如果是 8 卡纯 DP，将分组字符串写为 `"0;1;2;3;4;5;6;7"`；8 卡做 DP=4、TP=2，则写为 `"0,1;2,3;4,5;6,7"`。引号要保留，卡号只代表本机 GPU。
 
-**本实验使用 H100 时，建议优先 TP=1、每张 GPU 一个 DP。Qwen3.8-27B已经设置了BF16，理论上单卡也能容纳下一个模型推理，无需设置TP。** 单卡显存能容纳 Qwen3-8B 、DS-1.5B 或 Qwen3.8-27B 及当前上下文、并发预算时，独立副本可以同时处理更多任务，并省去 TP 通信，通常更适合提高整批数据的吞吐，参见 [vLLM 并行策略说明](https://docs.vllm.ai/en/stable/configuration/optimization/#parallelism-strategies)。
+**本实验使用 H100 时，建议优先 TP=1、每张 GPU 一个 DP。** 单卡显存能容纳 Qwen3-8B 及当前上下文、并发预算时，独立副本可以同时处理更多任务，并省去 TP 通信，通常更适合提高整批数据的吞吐，参见 [vLLM 并行策略说明](https://docs.vllm.ai/en/stable/configuration/optimization/#parallelism-strategies)。
 
-#### 1.2.1 采用8_1.2，DS-1.5B和Qwen3.8-27B分别构造数据（最新）
+#### 1.2.1 采用0.12_500_16384，用Qwen3-8B补全3000条数据（最新）
 
-**在运行之前，还是要根据1.2的提示先修改模型路径和GPU配置**，之后再运行下面的命令，分别补齐DS-1.5B和Qwen3.8-27B两个模型的各3000条数据：
-
-```bash
-# DS-1.5B 生成第 5041～6048 条。
-bash -e internal_time_series/scripts/build_data_5041-6048_samples_8_1.2_DS-1.5B.sh
-
-# DS-1.5B 生成第 6049～7056 条。
-bash -e internal_time_series/scripts/build_data_6049-7056_samples_8_1.2_DS-1.5B.sh
-
-# DS-1.5B 生成第 7057～8064 条。
-bash -e internal_time_series/scripts/build_data_7057-8064_samples_8_1.2_DS-1.5B.sh
-
-# Qwen3.8-27B 生成第 8065～9072 条。
-bash -e internal_time_series/scripts/build_data_8065-9072_samples_8_1.2_Qwen3.8-27B.sh
-
-# Qwen3.8-27B 生成第 9073～10080 条。
-bash -e internal_time_series/scripts/build_data_9073-10080_samples_8_1.2_Qwen3.8-27B.sh
-
-# Qwen3.8-27B 生成第 10081～11088 条。
-bash -e internal_time_series/scripts/build_data_10081-11088_samples_8_1.2_Qwen3.8-27B.sh
-```
-
-`bash -e` 会在脚本中的命令失败后停止。每批 1008 条，每个模型三批，实际各 3024 条。
-
-所有扩充数据属于 `8_1.2`，保存在 `internal_time_series/data/train/deepscaler_phases_8_1.2_8192/` 下：DS-1.5B 的三批是 `DS-1.5B/shard5_total40`、`DS-1.5B/shard6_total40` 和 `DS-1.5B/shard7_total40`；Qwen3.8-27B 的三批是 `Qwen3.8-27B/shard8_total40`、`Qwen3.8-27B/shard9_total40` 和 `Qwen3.8-27B/shard10_total40`。六份脚本均采用 `original` 划分算法，`--num_segments 8 --entropy_threshold 1.2`；生成与标注的 `--max_tokens`、`--max_model_len` 均为 `8192`。
-
-#### 1.2.2 采用0.12_500，Qwen3-8B构造多领域训练数据（最新）
-
-**在运行之前，还是要根据1.2的提示先修改模型路径和GPU配置**，之后按顺序运行下面八个脚本，使用 Qwen3-8B 分别构造日程推理、因果判断、科学问答、逻辑推理、会议规划、时间序列推理、对象追踪和真假话推理等多领域的训练数据。每个脚本依次完成推理轨迹生成与 phase 划分、判题和整份 Monte Carlo 标注：
+**在运行之前，还是要根据1.2的提示先修改模型路径和GPU配置**，之后按顺序运行下面三个脚本，采用 `0.12_500_16384` 配置，用 Qwen3-8B 补全约 3000 条数据。每个脚本依次完成推理轨迹生成与 phase 划分、判题和整份 Monte Carlo 标注：
 
 ```bash
-# Qwen3-8B 构造 calendar（日程推理）领域的数据。
-bash -e internal_time_series/scripts/build_data_calendar_0.12_500_Qwen3-8B.sh
+# Qwen3-8B 生成第 1009～2016 条，共 1008 条。
+bash -e internal_time_series/scripts/bash/build_data_1009-2016_samples_0.12_500_Qwen3-8B.sh
 
-# Qwen3-8B 构造 causal_judgement（因果判断）领域的数据。
-bash -e internal_time_series/scripts/build_data_causal_judgement_0.12_500_Qwen3-8B.sh
+# Qwen3-8B 生成第 2017～3024 条，共 1008 条。
+bash -e internal_time_series/scripts/bash/build_data_2017-3024_samples_0.12_500_Qwen3-8B.sh
 
-# Qwen3-8B 构造 gpqa_diamond（科学问答）领域的数据。
-bash -e internal_time_series/scripts/build_data_gpqa_diamond_0.12_500_Qwen3-8B.sh
-
-# Qwen3-8B 构造 logical_deduction_five_objects（五对象逻辑推理）领域的数据。
-bash -e internal_time_series/scripts/build_data_logical_deduction_five_objects_0.12_500_Qwen3-8B.sh
-
-# Qwen3-8B 构造 meeting（会议规划）领域的数据。
-bash -e internal_time_series/scripts/build_data_meeting_0.12_500_Qwen3-8B.sh
-
-# Qwen3-8B 构造 temporal_sequences（时间序列推理）领域的数据。
-bash -e internal_time_series/scripts/build_data_temporal_sequences_0.12_500_Qwen3-8B.sh
-
-# Qwen3-8B 构造 tracking_shuffled_objects_five_objects（五对象位置追踪）领域的数据。
-bash -e internal_time_series/scripts/build_data_tracking_shuffled_objects_five_objects_0.12_500_Qwen3-8B.sh
-
-# Qwen3-8B 构造 web_of_lies（真假话推理）领域的数据。
-bash -e internal_time_series/scripts/build_data_web_of_lies_0.12_500_Qwen3-8B.sh
+# Qwen3-8B 生成第 4033～5040 条，共 1008 条。
+bash -e internal_time_series/scripts/bash/build_data_4033-5040_samples_0.12_500_Qwen3-8B.sh
 ```
 
-`bash -e` 会在脚本中的命令失败后停止。八份脚本分别读取 `internal_time_series/deepscaler/data/test/<领域名>.json` 中的全部样本，不对输入分片，也不设置 `--limit`。所有多领域数据属于 `0.12_500`，四类数据文件统一保存在 `internal_time_series/data/train/multi_domain/` 下。每个领域使用 `<领域名>_0.12_500_16384_Qwen3-8B_` 作为文件名前缀，对应文件名为：
+`bash -e` 会在脚本中的命令失败后停止。每批 1008 条，三批实际合计 3024 条，分别对应第 1009～2016、2017～3024、4033～5040 题，分别是 `Qwen3-8B/shard1_total40`、`Qwen3-8B/shard2_total40` 和 `Qwen3-8B/shard4_total40`。三份脚本均采用 `adaptive` 划分算法，`--high_entropy_ratio 0.12 --target_phase_tokens 500`；生成与标注的 `--max_tokens`、`--max_model_len` 均为 `16384`。
 
-```text
-<领域名>_0.12_500_16384_Qwen3-8B_summary.jsonl
-<领域名>_0.12_500_16384_Qwen3-8B_steps.jsonl
-<领域名>_0.12_500_16384_Qwen3-8B_steps_labeled.jsonl
-<领域名>_0.12_500_16384_Qwen3-8B_steps_monte_carlo_details.jsonl
+#### 1.2.2 合并数据并训练模型
+
+把下面七份已完成 Monte Carlo 标注的 `steps_labeled.jsonl` 合并起来，共 **6048 条**，对应第 1～5040、6049～7056 题。以下命令都在仓库上一级目录运行，按文件目前的位置选择一种方式即可。
+
+| 文件路径 | 条数 |
+| --- | ---: |
+| `internal_time_series/data/train/deepscaler_phases_0.12_500_16384/Qwen3-8B/shard0_total80/steps_labeled.jsonl` | 504 |
+| `internal_time_series/data/train/deepscaler_phases_0.12_500_16384/Qwen3-8B/shard1_total80/steps_labeled.jsonl` | 504 |
+| `internal_time_series/data/train/deepscaler_phases_0.12_500_16384/Qwen3-8B/shard1_total40/steps_labeled.jsonl` | 1008 |
+| `internal_time_series/data/train/deepscaler_phases_0.12_500_16384/Qwen3-8B/shard2_total40/steps_labeled.jsonl` | 1008 |
+| `internal_time_series/data/train/deepscaler_phases_0.12_500_16384/Qwen3-8B/shard3_total40/steps_labeled.jsonl` | 1008 |
+| `internal_time_series/data/train/deepscaler_phases_0.12_500_16384/Qwen3-8B/shard4_total40/steps_labeled.jsonl` | 1008 |
+| `internal_time_series/data/train/deepscaler_phases_0.12_500_16384/Qwen3-8B/shard6_total40/steps_labeled.jsonl` | 1008 |
+
+**（1）如果七个文件仍在原来位置**
+
+直接运行下面的脚本。它会先检查文件和条数，全部符合要求后再合并。
+```bash
+python internal_time_series/build_data/5_merge_qwen3_8b_0.12_500_16384_steps.py
 ```
 
-其中 `<领域名>` 依次为 `calendar`、`causal_judgement`、`gpqa_diamond`、`logical_deduction_five_objects`、`meeting`、`temporal_sequences`、`tracking_shuffled_objects_five_objects` 和 `web_of_lies`。
+**（2）如果七个文件已经不在原来的位置**
+
+在任意位置新建一个 `merge` 文件夹，例如：
+```bash
+mkdir -p /srv/data/merge
+```
+把这七份标注文件复制进去，保留现在的文件名，不用改名。文件夹里只放这次要合并的七个 JSONL 文件。复制好后，运行下面的命令，把 `/srv/data/merge` 换成你的实际路径：
+```bash
+python internal_time_series/build_data/5_merge_step_labeled_jsonls.py --folder /srv/data/merge --output internal_time_series/data/train/deepscaler_phases_0.12_500_16384/Qwen3-8B/steps_labeled_1-5040_6049-7056.jsonl
+```
+脚本会读取文件夹里的所有 JSONL 文件，按文件名排序后合并，数字按大小排序。合并时保留原有的标注内容。运行时会打印合并顺序和总条数，完成后应为 **6048 条**。
+
+**两种方式都会将合并后的文件保存到internal_time_series/data/train/deepscaler_phases_0.12_500_16384/Qwen3-8B/steps_labeled_1-5040_6049-7056.jsonl中**，已有同名结果会被覆盖。
+
+**训练模型**
+
+合并完成后，在仓库上一级目录运行：
+```bash
+CUDA_VISIBLE_DEVICES=0,1,2,3 python internal_time_series/scripts/1_train_transformer_regress_phase_correctness_on_multi_dim_multi_source_trajectories_with_hybrid_loss_kford_tp.py --input_files internal_time_series/data/train/deepscaler_phases_0.12_500_16384/Qwen3-8B/steps_labeled_1-5040_6049-7056.jsonl --source_names Qwen3-8B --sampling_strategy proportional --selection_metric loss --loss_aggregation original --use_group_kfold --num_folds 5 --d_model 384 --nhead 12 --num_layers 8 --dim_feedforward 1536 --max_len 4096 --transformer_type causal --weight_decay 1e-3 --output_dir internal_time_series/results/train/phase_adaptive_predict/0.12_500_16384/Qwen3-8B/Qwen3-8B_deepscaler6000_transformer_prob_multi_dim_causal_hybrid_a0.8_p0.2_l8_h12_d384_dffn1536_r0.25_2e-6_b4 --dropout 0.25 --lr 2e-6 --batch_size 4 --gpu_groups "0;1;2;3" --tensor_parallel_size 1
+```
+#### 1.2.3 Best-of-N评测
+
+训练完成后，先下载旧测试的中间结果，再复制到本次实验目录，最后启动评测。以下命令都在仓库上一级目录运行。
+
+**（1）下载旧测试的中间结果**
+如果还没有 `modelscope` 命令，先[安装 ModelScope](https://github.com/modelscope/modelscope)：
+```bash
+python -m pip install modelscope
+```
+
+下载下面 11 个测试集的旧结果，文件会保存在 `internal_time_series/results/eval/best_of_n_prms/Qwen3-8B/` 下：
+```bash
+modelscope download --dataset andistance/internal_time_series --local_dir internal_time_series --include "results/eval/best_of_n_prms/Qwen3-8B/aime_0.12_500_16384/Qwen3-8B_deepscaler5000_transformer_prob_multi_dim_causal_hybrid_a0.8_p0.2_l8_h12_d384_dffn1536_5000_r0.25_1e-6_b1/*" "results/eval/best_of_n_prms/Qwen3-8B/calendar_0.12_500_16384/Qwen3-8B_deepscaler5000_transformer_prob_multi_dim_causal_hybrid_a0.8_p0.2_l8_h12_d384_dffn1536_5000_r0.25_1e-6_b1/*" "results/eval/best_of_n_prms/Qwen3-8B/causal_judgement_0.12_500_16384/Qwen3-8B_deepscaler5000_transformer_prob_multi_dim_causal_hybrid_a0.8_p0.2_l8_h12_d384_dffn1536_5000_r0.25_1e-6_b1/*" "results/eval/best_of_n_prms/Qwen3-8B/gpqa_diamond_0.12_500_16384/Qwen3-8B_deepscaler5000_transformer_prob_multi_dim_causal_hybrid_a0.8_p0.2_l8_h12_d384_dffn1536_5000_r0.25_1e-6_b1/*" "results/eval/best_of_n_prms/Qwen3-8B/logical_deduction_five_objects_0.12_500_16384/Qwen3-8B_deepscaler5000_transformer_prob_multi_dim_causal_hybrid_a0.8_p0.2_l8_h12_d384_dffn1536_5000_r0.25_1e-6_b1/*" "results/eval/best_of_n_prms/Qwen3-8B/math_0.12_500_16384/Qwen3-8B_deepscaler5000_transformer_prob_multi_dim_causal_hybrid_a0.8_p0.2_l8_h12_d384_dffn1536_5000_r0.25_1e-6_b1/*" "results/eval/best_of_n_prms/Qwen3-8B/meeting_0.12_500_16384/Qwen3-8B_deepscaler5000_transformer_prob_multi_dim_causal_hybrid_a0.8_p0.2_l8_h12_d384_dffn1536_5000_r0.25_1e-6_b1/*" "results/eval/best_of_n_prms/Qwen3-8B/temporal_sequences_0.12_500_16384/Qwen3-8B_deepscaler5000_transformer_prob_multi_dim_causal_hybrid_a0.8_p0.2_l8_h12_d384_dffn1536_5000_r0.25_1e-6_b1/*" "results/eval/best_of_n_prms/Qwen3-8B/tracking_shuffled_objects_five_objects_0.12_500_16384/Qwen3-8B_deepscaler5000_transformer_prob_multi_dim_causal_hybrid_a0.8_p0.2_l8_h12_d384_dffn1536_5000_r0.25_1e-6_b1/*" "results/eval/best_of_n_prms/Qwen3-8B/trip_0.12_500_16384/Qwen3-8B_deepscaler5000_transformer_prob_multi_dim_causal_hybrid_a0.8_p0.2_l8_h12_d384_dffn1536_5000_r0.25_1e-6_b1/*" "results/eval/best_of_n_prms/Qwen3-8B/web_of_lies_0.12_500_16384/Qwen3-8B_deepscaler5000_transformer_prob_multi_dim_causal_hybrid_a0.8_p0.2_l8_h12_d384_dffn1536_5000_r0.25_1e-6_b1/*"
+```
+**（2）把可复用的中间结果复制到本次实验目录**
+
+运行下面的脚本，把旧实验的生成结果和 token 置信度、熵文件复制到本次 6000 条训练数据对应的评测目录：
+```bash
+python internal_time_series/scripts/copy_prm_output_dir.py
+```
+复用的是 `.bon_generation.jsonl` 和 `.bon_token_entropies.jsonl` 这两类文件；不同测试脚本的文件名和存放位置略有区别，复制脚本会自动识别。后续评测会从这些结果继续运行，省去重复生成和计算熵的时间。复制脚本只需运行一次，目标文件已存在时会提示并停止。
+
+**（3）设置指向 /mnt/wangchenglong/models/Qwen3-8B 的模型软链接**
+
+把下面的 `/srv/models/Qwen3-8B` 换成你实际存放模型的绝对路径，再运行。如果 `/mnt/wangchenglong/models/Qwen3-8B` 已经指向正确的模型目录，可以跳过这一步。
+```bash
+sudo mkdir -p /mnt/wangchenglong/models
+sudo ln -s /srv/models/Qwen3-8B /mnt/wangchenglong/models/Qwen3-8B
+```
+**（4）启动 Best-of-N 评测**
+```bash
+bash internal_time_series/scripts/bash/test_transformer_best_of_n_Qwen3-8B_deepscaler6000_on_Qwen3-8B.sh
+```
+脚本已开启断点续跑。当前会同时使用 GPU 0～10，运行前按服务器实际情况调整脚本中的 GPU 编号。终端会打印每个测试集的日志位置。
 
 ---
 
@@ -155,16 +179,16 @@ step 置信度 `token_avg_confidence` 是该 step 内实际生成 token 概率 `
 | `--model_path` | 本机模型绝对路径 | 生成模型和 tokenizer 来源，标注阶段也须改为同一模型；跨系列切换见 1.4。 |
 | `--summary_jsonl` | 本批 `summary.jsonl` | 完整回答、长度、step 置信度序列和 phase 范围的输出路径。 |
 | `--step_jsonl` | 本批 `steps.jsonl` | 全部 steps、置信度、token 起点和 phase 标记的输出路径；后续使用 `--steps_path` 读取，注意单复数。 |
-| `--max_tokens` | `8192` | 原始回答最多新增 token 数，不强制生成到上限。 |
-| `--max_model_len` | `8192` | prompt 与输出合计的上下文上限，不是额外生成长度。 |
+| `--max_tokens` | `16384` | 原始回答最多新增 token 数，不强制生成到上限。 |
+| `--max_model_len` | `16384` | prompt 与输出合计的上下文上限，不是额外生成长度。 |
 | `--tensor_parallel_size` | `1` | 每个模型副本内部的 TP 卡数，不是总 GPU 数。 |
 | `--gpus` | `"0;1;2;3;4;5"` | 分号分隔独立 worker，逗号分隔同组 TP 卡；组内卡数与 TP 一致，字符串需加引号。 |
 | `--gpu_memory_utilization` | `0.98` | vLLM 显存预算比例；影响显存分配，不是算力利用率，也不设置 Transformers 熵计算的显存比例。 |
 | `--num_input_parts` | `40` | 把整个题库等分的份数，不是本次题目数量。 |
 | `--input_part_id` | 对应分片编号 | 从 0 开始选择一份，必须小于总份数；实际范围见下文的样本范围表。 |
-| `--phase_partition_algorithm` | `original` | 当前使用目标段数与熵阈值划分；另一选项 `adaptive` 使用高熵候选比例与目标 phase 长度。 |
-| `--num_segments` | `8` | original 模式的目标 phase 数。 |
-| `--entropy_threshold` | `1.2` | original 模式划分 phase 使用的熵阈值。 |
+| `--phase_partition_algorithm` | `adaptive` | 当前使用高熵候选比例与目标 phase 长度自适应划分；另一选项 `original` 使用目标段数与熵阈值。 |
+| `--high_entropy_ratio` | `0.12` | 高熵 token 的候选比例，不是熵阈值或标注 step 的比例。 |
+| `--target_phase_tokens` | `500` | 期望平均 phase 长度，不保证每段等长。 |
 | `--entropy_chunk_size` | `16` | 精确熵前向的 token 分块大小，影响显存和速度；不是 phase 长度、样本数或生成上限。 |
 
 #### 判题命令：读取生成结果并写入正确性
@@ -187,21 +211,21 @@ step 置信度 `token_avg_confidence` 是该 step 内实际生成 token 概率 `
 | `--output_steps_path` | labeled 轨迹输出；未开启可选 `--inplace` 时不覆盖原输入。 |
 | `--output_details_path` | 终点级续写、判题、正确次数和实际采样数等详情输出，父目录须存在。 |
 | `--model_path` | 同一生成模型的本机路径；生成、标注两处都要修改。 |
-| `--tensor_parallel_size`、`--gpu_groups` | 每 worker 的 TP 和本机 GPU 分组。当前六份脚本的生成和标注均为 TP=1、DP=6，分组为 `"0;1;2;3;4;5"`。注意参数名不是生成的 `--gpus`。 |
+| `--tensor_parallel_size`、`--gpu_groups` | 每 worker 的 TP 和本机 GPU 分组。当前三份脚本的生成和标注均为 TP=1、DP=6，分组为 `"0;1;2;3;4;5"`。注意参数名不是生成的 `--gpus`。 |
 | `--work_dir` | worker 输入副本、已有标签、详情和日志的状态目录。每个实验/part 独立，恢复原任务才复用。 |
 | `--K` | 当前为 8，表示每个选中终点续写次数；Python 默认值是 10，所以应显式传入。 |
 | `--batch_size` | 当前为 8，表示每个 worker 一批处理多少前缀任务；K=8 时最多产生 64 条续写，不表示 8 道原题。 |
 | `--save_every` | 当前为 30，累计至少完成这么多个前缀任务后保存；按批检查，batch=8 时通常到 32 个任务保存。 |
-| `--max_tokens` | 每条续写新增 token 上限，当前 8192；独立于原始生成阶段的同名设置。 |
-| `--max_model_len` | 题目、已有前缀与续写合计上限，当前 8192；已有前缀越长，剩余续写空间越少。 |
+| `--max_tokens` | 每条续写新增 token 上限，当前 16384；独立于原始生成阶段的同名设置。 |
+| `--max_model_len` | 题目、已有前缀与续写合计上限，当前 16384；已有前缀越长，剩余续写空间越少。 |
 | `--gpu_memory_utilization` | 当前为 0.98，标注 vLLM 的显存预算；增加 K、批大小和前缀长度都会影响显存。 |
-| `--vllm_enforce_eager` | 无值开关，禁用 CUDA Graph，减少图捕获相关显存开销，可能影响速度。当前六份脚本均未开启。 |
+| `--vllm_enforce_eager` | 无值开关，禁用 CUDA Graph，减少图捕获相关显存开销，可能影响速度。当前三份脚本均未开启。 |
 
 生成和标注默认采样温度为 `--temperature 0.7`、`--top_p 0.95`，可分别显式修改；默认未设置 `--seed`。固定 seed 有助于复现，但不同 GPU 分组或软件版本仍可能得到不同输出。Qwen thinking 默认 true，可显式传 `--enable_thinking true`。
 
 标注的可选参数 `--min_label_token_gap` 默认 128，设为 0 可关闭间隔过滤，仍保留 phase 和 think-end 筛选。需要在详情额外保存前缀、prompt、拼接后的回答时，分别加 `--save_prefix_in_details`、`--save_prompt_in_details`、`--save_full_output_in_details`。
 
-**区分同名 `--K`：生成脚本里它是 original 模式固定段数的别名，标注脚本里才是 Monte Carlo 次数。** 当前 original 模式通过 `--num_segments 8` 设置目标段数。
+**区分同名 `--K`：生成脚本里它是 original 模式固定段数的别名，标注脚本里才是 Monte Carlo 次数。** 当前采用 adaptive 模式，phase 数量由轨迹长度和划分参数决定。
 
 #### 修改样本范围和其他设置
 
@@ -303,11 +327,11 @@ DeepSeek 名称中虽然带 Qwen，本项目仍使用不带 `_qwen` 的通用脚
 
 如果一批数据由一台服务器标注太慢，可以先把已经生成的题目分成 5 个文件，让五台服务器同时各标一份，最后收集结果再合并。这是在分配不同题目的标注工作，不是在用 TP 把一份模型拆到多台机器。你需要人工启动服务器，并为每台准备它负责的那条命令。
 
-仓库保留的两份 `0.12_500` 历史配置命令清单是（不是当前 `8_1.2` 的六份脚本）：
+仓库保留的两份 `0.12_500` 历史配置命令清单是（当前三份脚本使用整份标注；以下为按需拆分的历史示例）：
 
 ```text
-scripts/build_data_1009-2016_samples_0.12_500_sharded_Qwen3-8B.sh
-scripts/build_data_5041-6048_samples_0.12_500_sharded_DS-1.5B.sh
+scripts/bash/0.12_500/build_data_1009-2016_samples_0.12_500_sharded_Qwen3-8B.sh
+scripts/bash/0.12_500/build_data_5041-6048_samples_0.12_500_sharded_DS-1.5B.sh
 ```
 
 相同范围的整份版与 sharded 版选一种即可；已经生成并判题过的数据可以直接使用，不必重新生成。
@@ -316,9 +340,7 @@ scripts/build_data_5041-6048_samples_0.12_500_sharded_DS-1.5B.sh
 
 ```bash
 RUN_DIR=internal_time_series/data/train/deepscaler_phases_0.12_500_16384/Qwen3-8B/shard1_total40
-python internal_time_series/build_data/3_split_step_jsonl_to_shards.py \
-  --input_jsonl "$RUN_DIR/steps.jsonl" \
-  --output_folder "$RUN_DIR/steps_shards"
+python internal_time_series/build_data/3_split_step_jsonl_to_shards.py --input_jsonl "$RUN_DIR/steps.jsonl" --output_folder "$RUN_DIR/steps_shards"
 ```
 
 `--input_jsonl` 是完整输入，`--output_folder` 是自动创建的拆分目录。每行仍是一道题的全部 steps。当前 main 固定拆 5 份，1008 条依次分为 **202、202、202、201、201** 条，文件名为 `part_01.jsonl`～`part_05.jsonl`。没有 `--num_parts` 参数；要改份数，需修改 Python 的 `num_parts=5` 或另行增加接口，并增减 part 标注命令。
@@ -333,14 +355,7 @@ PART=part_01
 WORK_DIR="internal_time_series/log/mc_parallel_work_shard1_total40_${PART}"
 mkdir -p "$RUN_DIR/steps_labeled_shards" "$RUN_DIR/step_monte_carlo_details_shards"
 
-python internal_time_series/build_data/4_build_phase_prospective_correctness_label_via_monte_carlo_qwen.py \
-  --steps_path "$RUN_DIR/steps_shards/${PART}.jsonl" \
-  --output_steps_path "$RUN_DIR/steps_labeled_shards/${PART}.jsonl" \
-  --output_details_path "$RUN_DIR/step_monte_carlo_details_shards/${PART}.jsonl" \
-  --model_path "$MODEL_PATH" \
-  --tensor_parallel_size 1 --gpu_groups "0;1;2;3;4;5" \
-  --work_dir "$WORK_DIR" --K 8 --batch_size 8 --save_every 30 \
-  --max_tokens 16384 --max_model_len 16384 --gpu_memory_utilization 0.98
+python internal_time_series/build_data/4_build_phase_prospective_correctness_label_via_monte_carlo_qwen.py --steps_path "$RUN_DIR/steps_shards/${PART}.jsonl" --output_steps_path "$RUN_DIR/steps_labeled_shards/${PART}.jsonl" --output_details_path "$RUN_DIR/step_monte_carlo_details_shards/${PART}.jsonl" --model_path "$MODEL_PATH" --tensor_parallel_size 1 --gpu_groups "0;1;2;3;4;5" --work_dir "$WORK_DIR" --K 8 --batch_size 8 --save_every 30 --max_tokens 16384 --max_model_len 16384 --gpu_memory_utilization 0.98
 ```
 
 服务器 A 从仓库上一级目录运行 `bash -e label_part_01.sh`；服务器 B 改 `PART=part_02`，另存并运行 `label_part_02.sh`，其余同理。这些单 part 脚本是人工另存的，不是仓库附带的额外文件。
@@ -353,9 +368,7 @@ DeepSeek 按相同方式分发，但改用通用标注 Python、DeepSeek 模型�
 
 ```bash
 RUN_DIR=internal_time_series/data/train/deepscaler_phases_0.12_500_16384/Qwen3-8B/shard1_total40
-python internal_time_series/build_data/5_merge_step_labeled_jsonls.py \
-  --folder "$RUN_DIR/steps_labeled_shards" \
-  --output "$RUN_DIR/steps_labeled.jsonl"
+python internal_time_series/build_data/5_merge_step_labeled_jsonls.py --folder "$RUN_DIR/steps_labeled_shards" --output "$RUN_DIR/steps_labeled.jsonl"
 ```
 
 `--folder` 必须是已标注的目录，程序按 `part_数字.jsonl` 的数字顺序拼接；`--output` 是最终文件，已有同名结果会被覆盖，父目录须存在。合并前确认五份均完成且属于同一实验；程序不会自动判断缺份、标签完成情况或去重。

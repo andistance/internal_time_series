@@ -53,7 +53,10 @@ def parse_args() -> argparse.Namespace:
         default="auto",
     )
     parser.add_argument("--fold_index", type=int)
-    parser.add_argument("--value_device", default="auto")
+    parser.add_argument(
+        "--value_device", default="auto",
+        help="Value model device, or DP/TP layout: '0;1' (DP), '0,1' (TP), '0,1;2,3' (DP+TP)",
+    )
     parser.add_argument("--scoring_batch_size", type=int, default=8)
     parser.add_argument("--candidate_batch_size", type=int, default=8)
     parser.add_argument("--max_tokens", type=int, default=8192)

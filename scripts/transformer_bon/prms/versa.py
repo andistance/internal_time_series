@@ -22,6 +22,76 @@ except ModuleNotFoundError:  # Keep package import light for transformer-only ru
 BASE_MODEL_FALLBACK = "UW-Madison-Lee-Lab/Llama-PRM800K"
 CANDIDATE_TOKEN_IDS = (12, 10)
 STEP_SEPARATOR_TOKEN_ID = 23535
+STEP_SEPARATOR_TEXT = " \n\n\n\n"
+
+
+def encode_solution_steps(tokenizer, problem, steps, max_length):
+    """Record inserted boundaries, excluding lookalike markers inside user text.
+
+    Preserve the original whole-text encoding when its boundary markers can be
+    located unambiguously. Otherwise encode each boundary separately so a BPE
+    whitespace merge cannot swallow the marker or merge it with the next step.
+    No text is stripped, no scores are invented, and no input is truncated.
+    """
+    if not steps:
+        raise ValueError('VersaPRM input has no solution_steps')
+    chunks = [str(problem) + ' \n\n']
+    boundaries = []
+    cursor = len(chunks[0])
+    for step in steps:
+        step = str(step)
+        chunks.extend((step, STEP_SEPARATOR_TEXT))
+        cursor += len(step)
+        boundaries.append((cursor, cursor + len(STEP_SEPARATOR_TEXT)))
+        cursor += len(STEP_SEPARATOR_TEXT)
+    text = ''.join(chunks)
+    ids = list(tokenizer.encode(text))
+    if len(ids) > max_length:
+        raise RuntimeError(
+            'VersaPRM input exceeds configured maximum length without silent truncation; '
+            f'token_length={len(ids)}, limit={max_length}')
+
+    positions = None
+    try:
+        encoded = tokenizer(text, add_special_tokens=True, return_offsets_mapping=True)
+        offsets = encoded['offset_mapping']
+        if list(encoded['input_ids']) == ids and len(offsets) == len(ids):
+            located = []
+            for left, right in boundaries:
+                matches = [i for i, (token, (start, end)) in enumerate(zip(ids, offsets))
+                           if token == STEP_SEPARATOR_TOKEN_ID and left <= start < end <= right]
+                if len(matches) != 1:
+                    break
+                located.append(matches[0])
+            if len(located) == len(steps):
+                positions = located
+    except (TypeError, KeyError, ValueError, AttributeError, NotImplementedError):
+        # Slow/custom tokenizers may not expose character offsets.
+        pass
+
+    if positions is None:
+        separator_ids = list(tokenizer.encode(STEP_SEPARATOR_TEXT, add_special_tokens=False))
+        marker_offsets = [i for i, token in enumerate(separator_ids) if token == STEP_SEPARATOR_TOKEN_ID]
+        if len(marker_offsets) != 1:
+            raise RuntimeError(
+                'VersaPRM tokenizer is incompatible with the expected step separator: '
+                f'expected token {STEP_SEPARATOR_TOKEN_ID} exactly once, got {separator_ids}. '
+                'Check that the tokenizer belongs to the VersaPRM checkpoint.')
+        # BOS/special tokens appear only in the first chunk, matching encode(text).
+        ids = list(tokenizer.encode(chunks[0] + str(steps[0])))
+        positions = []
+        for index in range(len(steps)):
+            positions.append(len(ids) + marker_offsets[0])
+            ids.extend(separator_ids)
+            if index + 1 < len(steps):
+                ids.extend(tokenizer.encode(str(steps[index + 1]), add_special_tokens=False))
+        if len(ids) > max_length:
+            raise RuntimeError(
+                'VersaPRM boundary-preserving input exceeds configured maximum length '
+                f'without silent truncation; token_length={len(ids)}, limit={max_length}')
+    if len(positions) != len(steps) or any(ids[i] != STEP_SEPARATOR_TOKEN_ID for i in positions):
+        raise RuntimeError('VersaPRM failed to align one scoring position per solution step')
+    return ids, positions
 
 
 def _split_steps(prefix: Any, separator: str) -> List[str]:
@@ -233,32 +303,17 @@ class VersaPRMScorer(PreparedRowsScorer):
             raise ValueError("VersaPRM input has no solution_steps")
         steps = [str(step) for step in raw_steps]
 
-        # This is the exact construction in the Hugging Face model card.
-        input_text = (
-            problem
-            + " \n\n"
-            + " \n\n\n\n".join(steps)
-            + " \n\n\n\n"
-        )
+        phase_ends = value.get("phase_ends")
+        if phase_ends is not None and any(int(end) < 1 or int(end) > len(steps) for end in phase_ends):
+            raise ValueError(f'VersaPRM phase_ends {phase_ends!r} outside 1..{len(steps)}')
+        ids, positions = encode_solution_steps(self.tokenizer, problem, steps, self.max_length)
         input_ids = torch.tensor(
-            [self.tokenizer.encode(input_text)],
+            [ids],
             dtype=torch.long,
             device="cpu",
         )
-        if input_ids.shape[1] > self.max_length:
-            raise RuntimeError(
-                "VersaPRM input exceeds --prm_max_length without silent truncation; "
-                f"token_length={int(input_ids.shape[1])}, limit={self.max_length}"
-            )
-
-        marker_mask = input_ids.eq(STEP_SEPARATOR_TOKEN_ID)
-        if not bool(marker_mask.any()):
-            raise RuntimeError(
-                f"VersaPRM marker token {STEP_SEPARATOR_TOKEN_ID} was not found; "
-                "increase prm_max_length or check the tokenizer/checkpoint"
-            )
-        marker_positions = marker_mask[0].nonzero(as_tuple=False).flatten()
-        return input_ids, marker_positions, value.get("phase_ends")
+        marker_positions = torch.tensor(positions, dtype=torch.long, device="cpu")
+        return input_ids, marker_positions, phase_ends
 
     def _score_prepared_tensor(self, prepared):
         input_ids, marker_positions, phase_ends = prepared
@@ -274,8 +329,8 @@ class VersaPRMScorer(PreparedRowsScorer):
             indices = [int(end) - 1 for end in phase_ends]
             if any(index < 0 or index >= len(all_step_scores) for index in indices):
                 raise RuntimeError(
-                    "VersaPRM phase end exceeds the number of visible step scores; "
-                    "ensure all phase steps fit within --prm_max_length"
+                    "VersaPRM phase end exceeds aligned step scores; "
+                    f"phase_ends={phase_ends!r}, num_step_scores={len(all_step_scores)}"
                 )
             selected_scores = all_step_scores[indices]
         del marker_positions, pair_logits, step_scores, input_ids

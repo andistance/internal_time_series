@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 from .errors import require_success
+from .json_codec import iter_encoded, decode_json
 
 import json
 import os
@@ -83,13 +84,13 @@ class RecordIndex(Mapping):
         with self.path.open("rb") as file:
             for key in chain((first,), keys):
                 file.seek(self.locations[key].offset)
-                yield key, json.loads(file.readline())
+                yield key, decode_json(file.readline())
 
     def __getitem__(self, key):
         offset = self.locations[key].offset
         with self.path.open("rb") as file:
             file.seek(offset)
-            return json.loads(file.readline())
+            return decode_json(file.readline())
 
     def __contains__(self, key):
         return key in self.locations
@@ -106,12 +107,12 @@ def write_records(path, records, *, append=False, keys=None):
     references = []
     keys = iter(keys) if keys is not None else None
     records = iter(records)
+    encoded = iter_encoded(records, validate=require_success)
     try:
         with path.open("ab" if append else "wb") as file:
-            for record in records:
-                require_success(record)
+            for record, payload in encoded:
                 offset = file.tell()
-                file.write(json.dumps(record, ensure_ascii=False, allow_nan=False).encode("utf-8") + NEWLINE)
+                file.write(payload + NEWLINE)
                 key = next(keys) if keys is not None else record.get("candidate_key")
                 if keys is not None or key is not None:
                     references.append((key if keys is not None else str(key), offset, record.get("request_id"),
@@ -119,6 +120,7 @@ def write_records(path, records, *, append=False, keys=None):
             file.flush()
             os.fsync(file.fileno())
     finally:
+        encoded.close()
         if hasattr(records, "close"):
             records.close()
     return references
